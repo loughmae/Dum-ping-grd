@@ -4,10 +4,14 @@ Streamlit app for exploring personal dose/exposure monitoring data
 (e.g. Hp(10) deep dose equivalent for interventional cardiologists)
 over 3, 6, 12-month and multi-year windows.
 
-Expected CSV columns:
-    worker_id, name, role, month (YYYY-MM), hp10_deep_msv
-Optional:
-    monitors_reported (0/1, whether a reading was reported)
+Accepts two CSV formats:
+  Provider exports (e.g. Landauer-style): Account, Location, Wearer #,
+  Name, ID, Serial No, Badge Type, Body Region, Start Date, End Date,
+  HP(10) Deep, HP(3) Eye, HP(0.07) Shallow, Neutron, Notes.
+  Canonical: worker_id, name, role, month (YYYY-MM), hp10_deep_msv.
+
+Roles are tagged in the app and remembered per wearer number in
+role_assignments.csv.
 """
 from __future__ import annotations
 
@@ -19,7 +23,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-REQUIRED_COLS = {"worker_id", "name", "role", "month", "hp10_deep_msv"}
+import dose_io
+import role_store
+
 EXAMPLE_CSV = Path(__file__).parent / "data" / "hp10_dose_example.csv"
 
 ICRP_ANNUAL_AVG_LIMIT = 20.0
@@ -36,21 +42,36 @@ WINDOW_CHOICES = {
 st.set_page_config(page_title="Hp(10) Dose Trends", page_icon="☢️", layout="wide")
 
 
+def ensure_example_csv() -> Path:
+    if not EXAMPLE_CSV.exists():
+        from generate_example_data import generate
+        EXAMPLE_CSV.parent.mkdir(parents=True, exist_ok=True)
+        generate().to_csv(EXAMPLE_CSV, index=False)
+    return EXAMPLE_CSV
+
+
 @st.cache_data
-def load_csv(source: bytes | None) -> pd.DataFrame:
+def load_csv(source: bytes | None) -> tuple[pd.DataFrame, bool]:
     if source is None:
-        df = pd.read_csv(EXAMPLE_CSV)
+        df, is_provider = dose_io.read_dose_csv(str(ensure_example_csv()))
     else:
-        df = pd.read_csv(pd.io.common.BytesIO(source))
-    missing = REQUIRED_COLS - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {', '.join(sorted(missing))}")
-    df["month"] = pd.PeriodIndex(df["month"], freq="M")
-    df["hp10_deep_msv"] = pd.to_numeric(df["hp10_deep_msv"], errors="coerce")
-    df = df.dropna(subset=["hp10_deep_msv"])
-    if "monitors_reported" not in df.columns:
-        df["monitors_reported"] = 1
-    return df.sort_values(["worker_id", "month"]).reset_index(drop=True)
+        df, is_provider = dose_io.read_dose_csv(source)
+    return df, is_provider
+
+
+def apply_roles(df: pd.DataFrame) -> pd.DataFrame:
+    assigned = role_store.load_roles()
+    if "role" in df.columns:
+        known = df.dropna(subset=["role"])[["worker_id", "role"]].drop_duplicates()
+        new = {str(w): str(r) for w, r in known.itertuples(index=False) if str(w) not in assigned}
+        if new:
+            assigned.update(new)
+            role_store.save_roles(assigned)
+        df = df.drop(columns=["role"])
+    df = df.copy()
+    df["worker_id"] = df["worker_id"].astype(str)
+    df["role"] = df["worker_id"].map(assigned).fillna("unassigned")
+    return df, assigned
 
 
 def add_rolling(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
@@ -232,26 +253,71 @@ def main() -> None:
         st.header("Data")
         uploaded = st.file_uploader("Upload dose CSV", type="csv")
         st.caption(
-            "Columns: worker_id, name, role, month (YYYY-MM), "
-            "hp10_deep_msv. Leave empty to use the bundled 5-year "
-            "cardiology example dataset."
+            "Accepts dosimetry provider exports (Wearer #, HP(10) Deep, ...) "
+            "or canonical CSVs (worker_id, name, role, month, hp10_deep_msv). "
+            "Leave empty to use the bundled 5-year cardiology example."
         )
 
     try:
-        df = load_csv(uploaded.getvalue() if uploaded is not None else None)
-    except ValueError as exc:
-        st.error(str(exc))
+        df, is_provider = load_csv(
+            uploaded.getvalue() if uploaded is not None else None
+        )
+        df, assigned_roles = apply_roles(df)
+    except (ValueError, TypeError) as exc:
+        st.error(f"Could not parse the dose data: {exc}")
         st.stop()
+
+    unassigned = df.loc[df["role"] == "unassigned", "worker_id"].nunique()
+    with st.expander(
+        f"🏷️ Worker roles — {unassigned} unassigned",
+        expanded=0 < unassigned <= 20,
+    ):
+        st.caption(
+            "Tag each wearer with a role. Assignments are remembered per "
+            "wearer number in `role_assignments.csv` and applied automatically "
+            "to future uploads."
+        )
+        worker_list = df[["worker_id", "name", "role"]].drop_duplicates().sort_values(["role", "name"])
+        if "custom_roles" not in st.session_state:
+            st.session_state["custom_roles"] = []
+        new_role = st.text_input("Add a new role option")
+        if st.button("Add role option") and new_role.strip():
+            st.session_state["custom_roles"].append(new_role.strip().lower())
+            st.rerun()
+        options = role_store.role_options(assigned_roles, st.session_state["custom_roles"])
+        search = st.text_input("Find wearer (ID or name)")
+        visible = worker_list
+        if search:
+            s = search.lower()
+            visible = worker_list[
+                worker_list["worker_id"].str.lower().str.contains(s, na=False)
+                | worker_list["name"].str.lower().str.contains(s, na=False)
+            ]
+        changed = False
+        for row in visible.itertuples(index=False):
+            current = assigned_roles.get(row.worker_id, "unassigned")
+            opts = options if current in options else [current, *options]
+            chosen = st.selectbox(
+                f"{row.worker_id} — {row.name}",
+                opts,
+                index=opts.index(current),
+                key=f"role_{row.worker_id}",
+            )
+            if chosen != current:
+                assigned_roles[row.worker_id] = chosen
+                changed = True
+        if changed:
+            role_store.save_roles(assigned_roles)
+            st.cache_data.clear()
+            st.rerun()
 
     with st.sidebar:
         st.header("Filters")
         roles = sorted(df["role"].unique())
-        selected_roles = st.multiselect("Role", roles, default=roles)
+        default_roles = [r for r in roles if r != "control"]
+        selected_roles = st.multiselect("Role", roles, default=default_roles)
         workers = df[df["role"].isin(selected_roles)]["name"].sort_values().unique()
-        selected_workers = st.multiselect(
-            "Workers (empty = all)", list(workers),
-            default=None if len(workers) <= 12 else list(workers)[:12],
-        )
+        selected_workers = st.multiselect("Workers (empty = all)", list(workers))
         window_label = st.select_slider(
             "Trend window", options=list(WINDOW_CHOICES), value="12 months"
         )
@@ -349,7 +415,12 @@ def main() -> None:
     st.plotly_chart(worker_comparison_plot(sub), width="stretch")
 
     with st.expander("Recent data"):
-        show = sub[["month", "worker_id", "name", "role", "hp10_deep_msv"]].copy()
+        base_cols = ["month", "worker_id", "name", "role", "hp10_deep_msv"]
+        extra_cols = [
+            c for c in ["hp3_eye_msv", "hp007_shallow_msv", "neutron_msv", "badge_type", "location"]
+            if c in sub.columns
+        ]
+        show = sub[base_cols + extra_cols].copy()
         show["month"] = show["month"].astype(str)
         st.dataframe(show.tail(200), width="stretch")
         st.download_button(

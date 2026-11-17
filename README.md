@@ -14,32 +14,56 @@ for interventional cardiologists over 5 years**.
   the ICRP 20 mSv/y (5-year average) and 50 mSv single-year reference lines.
 - **Annual comparison**: yearly total Hp(10) per worker, faceted and
   colour-coded by role.
-- **Bring your own data**: upload any CSV with the schema below, or use the
-  bundled synthetic 5-year cardiology example.
+- **Bring your own data**: upload a dosimetry provider export or a canonical
+  CSV, or use the bundled synthetic 5-year cardiology example.
+- **Role tagging**: tag each wearer with a role in the app; assignments are
+  remembered per wearer number in `role_assignments.csv` and applied
+  automatically to future uploads.
 
 ## Quick start
 
 ```bash
 pip install -r requirements.txt
-python generate_example_data.py        # writes data/hp10_dose_example.csv
 streamlit run app.py
 ```
 
-## Data schema
+The first run auto-generates `data/hp10_dose_example.csv` (or run
+`python generate_example_data.py` manually to customise months/seed).
+
+## Data formats
+
+**Provider exports** are auto-detected by their columns, e.g.:
+
+```
+Account, Location, Wearer #, Name, ID, Serial No, Badge Type, Body Region,
+Start Date, End Date, HP(10) Deep, HP(3) Eye, HP(0.07) Shallow, Neutron, Notes
+```
+
+- The reporting month is taken from the End Date.
+- Rows with `CONTROL` (or blank) in Wearer # are treated as control
+  dosimeters (`CONTROL-<serial>` ids) and excluded from the role filter by
+  default.
+- HP(3) Eye, HP(0.07) Shallow and Neutron columns are parsed and kept in the
+  data table; trend charts currently use HP(10) Deep.
+- Excel overflow values (`########`) and unreadable rows are dropped.
+
+**Canonical CSV schema:**
 
 | column             | type     | required | notes                              |
 |--------------------|----------|----------|------------------------------------|
 | `worker_id`        | string   | yes      | unique per monitored worker        |
 | `name`             | string   | yes      | display name                       |
-| `role`             | string   | yes      | e.g. `cardiologist`                |
+| `role`             | string   | no       | seeds the role store on first load |
 | `month`            | YYYY-MM  | yes      | reporting period                   |
 | `hp10_deep_msv`    | number   | yes      | Hp(10) deep dose equivalent (mSv)  |
 | `monitors_reported`| 0/1      | no       | whether a reading was returned     |
 
-Real-world data typically comes from a dosimetry provider's export
-(monthly badge reports). Map their columns to the schema above in a
-spreadsheet or a small preprocessing script before uploading; the
-dashboard only needs those five fields.
+## Role memory
+
+Roles are stored in `role_assignments.csv` (override the path with the
+`DOSE_ROLE_FILE` environment variable) keyed by wearer number, so each
+monthly export you upload inherits the roles you assigned previously. New
+wearer numbers appear as `unassigned` in the tagging panel.
 
 ## Notes
 
