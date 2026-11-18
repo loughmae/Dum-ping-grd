@@ -32,6 +32,7 @@ def _worker_profile(rng: np.random.Generator, role: str) -> dict:
         "trend": rng.uniform(-0.004, 0.010),
         "seasonal_amp": rng.uniform(0.0, 0.35),
         "noise_sd": 0.18 * base + 0.01,
+        "eye_ratio": rng.uniform(0.4, 1.3),
     }
 
 
@@ -60,6 +61,10 @@ def generate(months: int = 63, seed: int = 42) -> pd.DataFrame:
                     dose *= rng.uniform(1.8, 3.0)
 
                 dose = max(round(float(dose), 3), 0.0)
+                eye_ratio = p["eye_ratio"]
+                if role == "cardiologist" and wid.endswith("003") and frac > 0.6:
+                    eye_ratio *= 1.0 + 1.2 * (frac - 0.6) / 0.4
+                eye = max(round(float(dose * eye_ratio * rng.uniform(0.8, 1.2)), 3), 0.0)
                 rows.append(
                     {
                         "worker_id": wid,
@@ -67,6 +72,7 @@ def generate(months: int = 63, seed: int = 42) -> pd.DataFrame:
                         "role": role,
                         "month": str(period),
                         "hp10_deep_msv": dose,
+                        "hp3_eye_msv": eye,
                         "monitors_reported": int(rng.random() < 0.97),
                     }
                 )

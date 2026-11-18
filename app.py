@@ -30,6 +30,11 @@ EXAMPLE_CSV = Path(__file__).parent / "data" / "hp10_dose_example.csv"
 
 INF = float("inf")
 
+LOW_DOSE_ANNUAL = 1.0
+MIN_DEEP_FOR_RATIO = 0.1
+PEER_MULTIPLE_FLAG = 2.0
+SIG_T_THRESHOLD = 2.0
+
 METRICS = {
     "HP(10) Deep": {
         "col": "hp10_deep_msv",
@@ -361,6 +366,13 @@ def project_next_year(grp: pd.DataFrame, col: str) -> tuple[float | None, str]:
 
 
 def attention_table(sub: pd.DataFrame, col: str, cfg: dict) -> pd.DataFrame:
+    t12_map = sub.groupby("worker_id").apply(
+        lambda g: g.sort_values("month")[col].tail(12).sum()
+    )
+    role_map = sub.groupby("worker_id")["role"].first()
+    role_sizes = role_map.value_counts()
+    role_median = t12_map.groupby(role_map).median()
+    cohort_median = float(t12_map.median())
     rows = []
     for wid, grp in sub.groupby("worker_id"):
         grp = grp.sort_values("month")
@@ -378,6 +390,18 @@ def attention_table(sub: pd.DataFrame, col: str, cfg: dict) -> pd.DataFrame:
             direction = "⬆️ worsening" if pi > ci else "⬇️ improving" if pi < ci else "→ stable"
             projected_display = round(projected, 2)
         pct = t12 / cfg["annual_limit"] * 100 if cfg["annual_limit"] else 0
+        peers_n = int(role_sizes.get(grp["role"].iloc[0], 0))
+        peer_med = (
+            float(role_median.get(grp["role"].iloc[0], cohort_median))
+            if peers_n >= 3 and float(role_median.get(grp["role"].iloc[0], 0)) > 0
+            else cohort_median
+        )
+        vs_peers = float(t12) / peer_med if peer_med > 0 else np.nan
+        peers_label = (
+            f"{vs_peers:.1f}× role" if peers_n >= 3 else f"{vs_peers:.1f}× cohort"
+        )
+        if np.isfinite(vs_peers) and vs_peers >= PEER_MULTIPLE_FLAG:
+            peers_label += " ⚠️"
         rows.append(
             {
                 "worker": grp["name"].iloc[0],
@@ -390,6 +414,7 @@ def attention_table(sub: pd.DataFrame, col: str, cfg: dict) -> pd.DataFrame:
                 "projected band": projected_band,
                 "direction": direction,
                 "projection method": method if projected is not None else "—",
+                "vs peers": peers_label,
             }
         )
     return (
@@ -420,6 +445,199 @@ def dose_heatmap(sub: pd.DataFrame, col: str, metric: str, n_months: int = 24) -
         height=max(320, 28 * len(piv) + 120),
         yaxis_title="Worker",
         xaxis_title="Month",
+    )
+    return fig
+
+
+def significant_trends(
+    sub: pd.DataFrame, col: str, months: int = 12, min_months: int = 8,
+    t_thresh: float = SIG_T_THRESHOLD,
+) -> list[dict]:
+    results = []
+    for wid, grp in sub.groupby("worker_id"):
+        g = grp.sort_values("month").tail(months)
+        y = g[col].to_numpy(dtype=float)
+        if len(y) < min_months:
+            continue
+        x = np.arange(len(y), dtype=float)
+        sxx = float(((x - x.mean()) ** 2).sum())
+        if sxx == 0:
+            continue
+        slope, intercept = np.polyfit(x, y, 1)
+        resid = y - (slope * x + intercept)
+        dof = len(y) - 2
+        sse = float((resid ** 2).sum())
+        se = np.sqrt(sse / dof / sxx) if dof > 0 and sse > 0 else np.inf
+        t = slope / se if se and np.isfinite(se) and se > 0 else 0.0
+        if abs(t) > t_thresh:
+            results.append(
+                {
+                    "worker_id": wid,
+                    "name": g["name"].iloc[0],
+                    "slope": float(slope),
+                    "t": float(t),
+                    "months": list(g["month"]),
+                    "actual": y,
+                    "fit": slope * x + intercept,
+                }
+            )
+    return results
+
+
+def significant_trends_plot(results: list[dict], metric: str) -> go.Figure:
+    fig = go.Figure()
+    for r in results:
+        color = "#d62728" if r["slope"] > 0 else "#2ca02c"
+        label = f'{r["name"]} (t={r["t"]:.1f})'
+        stamps = [p.to_timestamp() for p in r["months"]]
+        fig.add_trace(
+            go.Scatter(
+                x=stamps, y=r["actual"], mode="lines+markers",
+                name=label, legendgroup=label, line=dict(color=color),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=stamps, y=r["fit"], mode="lines",
+                name=None, legendgroup=label, showlegend=False,
+                line=dict(color=color, dash="dash", width=1),
+            )
+        )
+    fig.update_layout(
+        template="plotly_white",
+        height=360,
+        yaxis_title=f"{metric} (mSv/month)",
+        xaxis_title="Month",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig
+
+
+def low_dose_table(
+    sub: pd.DataFrame, col: str, threshold: float = LOW_DOSE_ANNUAL
+) -> pd.DataFrame:
+    rows = []
+    for wid, grp in sub.groupby("worker_id"):
+        g = grp.sort_values("month")
+        t12 = g[col].tail(12).sum()
+        expected = g["month"].max().ordinal - g["month"].min().ordinal + 1
+        reported = g["month"].nunique()
+        gaps = expected - reported
+        notes = []
+        if gaps > 0:
+            notes.append(f"🟠 {gaps} missing month(s) — verify badge wear/return")
+        if t12 <= threshold:
+            notes.append(
+                f"🔵 ≤ {threshold:g} mSv/y — candidate for reduced surveillance "
+                f"(no individual monitoring required at or below this level)"
+            )
+        if not notes:
+            notes.append("🟢 routine individual monitoring")
+        rows.append(
+            {
+                "worker": g["name"].iloc[0],
+                "role": g["role"].iloc[0],
+                "rolling 12-mo (mSv)": round(float(t12), 2),
+                "months in service": expected,
+                "months returned": reported,
+                "gaps": gaps,
+                "surveillance note": "; ".join(notes),
+            }
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["gaps", "rolling 12-mo (mSv)"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
+
+
+def eye_deep_pairs(df: pd.DataFrame, min_deep: float = MIN_DEEP_FOR_RATIO) -> pd.DataFrame:
+    cols_needed = {"hp10_deep_msv", "hp3_eye_msv"} <= set(df.columns)
+    if not cols_needed:
+        return pd.DataFrame()
+    records = []
+    for (wid, month), grp in df.groupby(["worker_id", "month"]):
+        deep_ok = grp["hp10_deep_msv"].notna() & (grp["hp10_deep_msv"] >= min_deep)
+        eye_ok = grp["hp3_eye_msv"].notna()
+        same_badge = grp[deep_ok & eye_ok]
+        if not same_badge.empty:
+            for _, r in same_badge.iterrows():
+                region = str(getattr(r, "body_region", "") or "").lower()
+                if "eye" in region or "temple" in region or "forehead" in region:
+                    basis = "eye-position dosimeter (both quantities)"
+                else:
+                    basis = "same badge"
+                records.append(
+                    {
+                        "worker_id": wid, "name": grp["name"].iloc[0],
+                        "role": grp["role"].iloc[0], "month": month,
+                        "ratio": float(r["hp3_eye_msv"] / r["hp10_deep_msv"]),
+                        "basis": basis,
+                    }
+                )
+            continue
+        if deep_ok.any() and eye_ok.any():
+            eye_rows = grp[eye_ok]
+            deep_rows = grp[deep_ok]
+            records.append(
+                {
+                    "worker_id": wid, "name": grp["name"].iloc[0],
+                    "role": grp["role"].iloc[0], "month": month,
+                    "ratio": float(eye_rows["hp3_eye_msv"].sum() / deep_rows["hp10_deep_msv"].sum()),
+                    "basis": "eye badge vs chest badge (cross-badge)",
+                }
+            )
+    return pd.DataFrame(records)
+
+
+def eye_deep_summary(pairs: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for wid, grp in pairs.sort_values("month").groupby("worker_id"):
+        r_vals = grp["ratio"].to_numpy(dtype=float)
+        basis = grp["basis"].mode().iloc[0]
+        recent = r_vals[-6:]
+        baseline = r_vals[:-6]
+        if len(recent) >= 4 and len(baseline) >= 4:
+            m1, m2 = recent.mean(), baseline.mean()
+            v1 = recent.var(ddof=1)
+            v2 = baseline.var(ddof=1)
+            se = np.sqrt(v1 / len(recent) + v2 / len(baseline))
+            drift_t = (m1 - m2) / se if se > 0 else 0.0
+            pct_drift = (m1 / m2 - 1) * 100 if m2 > 0 else 0.0
+            flag = "🟠 significant ratio drift" if abs(drift_t) > 2 else "🟢 stable"
+        else:
+            drift_t, pct_drift = np.nan, np.nan
+            flag = "— building history"
+        rows.append(
+            {
+                "worker": grp["name"].iloc[0],
+                "role": grp["role"].iloc[0],
+                "paired months": len(grp),
+                "mean eye:deep ratio": round(float(r_vals.mean()), 2),
+                "recent mean ratio": round(float(recent.mean()), 2),
+                "drift": f"{pct_drift:+.0f}%" if np.isfinite(pct_drift) else "—",
+                "status": flag,
+                "basis": basis,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def eye_deep_ratio_plot(pairs: pd.DataFrame) -> go.Figure:
+    fig = px.line(
+        pairs, x=pairs["month"].dt.to_timestamp(), y="ratio", color="name",
+        markers=True, labels={"y": "Eye : Deep ratio", "month": "Month", "name": "Worker"},
+    )
+    fig.add_hline(
+        y=float(pairs["ratio"].median()), line_dash="dot",
+        annotation_text="cohort median", line_color="grey",
+    )
+    fig.update_layout(
+        template="plotly_white", height=380,
+        yaxis_title="Eye : Deep dose ratio",
+        xaxis_title="Month",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     return fig
 
@@ -532,6 +750,16 @@ def main() -> None:
         st.warning(f"No {metric_label} readings for the selected filters.")
         st.stop()
 
+    numeric_cols = [
+        c for c in ["hp10_deep_msv", "hp3_eye_msv", "hp007_shallow_msv", "neutron_msv"]
+        if c in sub.columns
+    ]
+    sub = (
+        sub.groupby(["worker_id", "name", "role", "month"], as_index=False)[numeric_cols]
+        .sum()
+        .sort_values("month")
+        .reset_index(drop=True)
+    )
     sub = add_rolling(sub, [3, 6, 12], dose_col)
 
     latest = sub["month"].max()
@@ -617,6 +845,31 @@ def main() -> None:
         width="stretch",
     )
 
+    st.subheader(f"Statistically significant dose trends — {metric_label}")
+    sig = significant_trends(sub, dose_col)
+    if sig:
+        for r in sorted(sig, key=lambda r: r["slope"], reverse=True):
+            sign = "rising" if r["slope"] > 0 else "falling"
+            st.caption(
+                f"**{r['name']}** — {sign} at {r['slope']:+.3f} mSv/month "
+                f"(t={r['t']:.1f}) over the last 12 reported months"
+            )
+        st.plotly_chart(significant_trends_plot(sig, metric_label), width="stretch")
+    else:
+        st.caption(
+            "No statistically significant monthly trend for any selected worker "
+            f"(|t| > {SIG_T_THRESHOLD:g}, ≥ 8 reported months)."
+        )
+
+    st.subheader("Low-dose & badge-compliance watch")
+    st.dataframe(low_dose_table(sub, dose_col), width="stretch", hide_index=True)
+    st.caption(
+        "Workers at or below 1 mSv/y rolling effective dose may not require "
+        "individual monitoring under IRR19 (RPO decision). Missing months are "
+        "flagged separately: a low reported dose with badge gaps suggests "
+        "badges not worn or not returned, not low exposure."
+    )
+
     left, right = st.columns(2)
     with left:
         st.subheader("Rolling means (cohort)")
@@ -629,6 +882,22 @@ def main() -> None:
 
     st.subheader(f"Dose heatmap — last 24 months ({metric_label})")
     st.plotly_chart(dose_heatmap(sub, dose_col, metric_label), width="stretch")
+
+    pairs = eye_deep_pairs(df[mask])
+    if not pairs.empty:
+        st.subheader("Eye : deep dose ratio (HP(3) : HP(10))")
+        st.dataframe(eye_deep_summary(pairs), width="stretch", hide_index=True)
+        st.plotly_chart(eye_deep_ratio_plot(pairs), width="stretch")
+        st.caption(
+            "Ratio meaning depends on data basis: values recorded on the same "
+            "badge (dual-quantity chip) reflect attenuation at that badge's "
+            "position; values from a dedicated eye dosimeter versus a chest "
+            "badge are cross-badge and reflect apron shielding plus geometry. "
+            "Ratios are suppressed where the deep dose is below "
+            f"{MIN_DEEP_FOR_RATIO:g} mSv (denominator too small to be meaningful). "
+            "Flags mark statistically significant drift in a worker's own "
+            "baseline, not an absolute regulatory limit."
+        )
 
     st.subheader("Annual dose by worker")
     st.plotly_chart(

@@ -22,9 +22,26 @@ for interventional cardiologists over 5 years**.
   whole group, per-worker bars + rolling-average lines.
 - **Worker attention list**: every wearer ranked by trailing 12-month dose
   as a percentage of the annual reference limit, with their classification
-  band and months-reported context.
+  band and months-reported context, plus cohort-relative flagging (`×role`
+  median, ⚠️ at ≥2× peers) and a next-year projection band (seasonal
+  climatology with 24+ months of history, run-rate with 6+, withheld
+  below that).
+- **Significant trends chart**: per-worker linear regression over the last
+  12 reported months, shown only where the slope is statistically
+  significant — rising in red, falling in green, with fitted lines.
+- **Low-dose & badge-compliance watch**: workers at or below 1 mSv/y
+  (IRR19: individual monitoring not required) flagged as reduced-
+  surveillance candidates; missing badge-return months flagged separately,
+  since a low dose with return gaps means badges not worn, not low
+  exposure.
 - **Dose heatmap**: worker × month grid of the last 24 months for spotting
   workload spikes and pattern changes at a glance.
+- **Eye : deep dose ratio (HP(3) : HP(10))**: badge-aware pairing — both
+  quantities on one badge reflect attenuation at that badge position;
+  eye dosimeter vs chest badge is labelled cross-badge and reflects apron
+  shielding plus geometry. Ratios computed only where deep ≥ 0.1 mSv, and
+  flagged on statistically significant drift from the worker's own
+  baseline.
 - **Limit tracking**: trailing 12-month cumulative dose per worker against
   ICRP reference lines per metric.
 - **Annual comparison**: yearly total Hp(10) per worker, faceted and
