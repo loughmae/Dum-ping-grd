@@ -342,21 +342,54 @@ def worker_comparison_plot(
     return fig
 
 
+def band_index(band_label: str, bands: list[tuple[float, str]]) -> int:
+    for idx, (_, label) in enumerate(bands):
+        if label == band_label:
+            return idx
+    return -1
+
+
+def project_next_year(grp: pd.DataFrame, col: str) -> tuple[float | None, str]:
+    grp = grp.sort_values("month")
+    n_months = grp["month"].nunique()
+    climatology = grp.groupby(grp["month"].dt.month)[col].mean()
+    if n_months >= 24 and len(climatology) == 12 and climatology.notna().all():
+        return float(climatology.sum()), "seasonal"
+    if n_months >= 6:
+        return float(grp[col].tail(6).mean() * 12), "run-rate"
+    return None, "insufficient"
+
+
 def attention_table(sub: pd.DataFrame, col: str, cfg: dict) -> pd.DataFrame:
     rows = []
     for wid, grp in sub.groupby("worker_id"):
         grp = grp.sort_values("month")
         t12 = grp[col].tail(12).sum()
         months = grp["month"].tail(12).nunique()
+        projected, method = project_next_year(grp, col)
+        current_band = band_for(t12, cfg["bands"])
+        if projected is None:
+            projected_band = "— insufficient history"
+            direction = "—"
+            projected_display = None
+        else:
+            projected_band = band_for(projected, cfg["bands"])
+            ci, pi = band_index(current_band, cfg["bands"]), band_index(projected_band, cfg["bands"])
+            direction = "⬆️ worsening" if pi > ci else "⬇️ improving" if pi < ci else "→ stable"
+            projected_display = round(projected, 2)
         pct = t12 / cfg["annual_limit"] * 100 if cfg["annual_limit"] else 0
         rows.append(
             {
                 "worker": grp["name"].iloc[0],
                 "role": grp["role"].iloc[0],
-                "trailing 12-mo (mSv)": round(float(t12), 2),
+                "rolling 12-mo (mSv)": round(float(t12), 2),
                 "months reported": months,
                 "% of annual limit": round(float(pct), 1),
-                "classification band": band_for(t12, cfg["bands"]),
+                "current band": current_band,
+                "projected next 12-mo (mSv)": projected_display,
+                "projected band": projected_band,
+                "direction": direction,
+                "projection method": method if projected is not None else "—",
             }
         )
     return (
@@ -559,13 +592,22 @@ def main() -> None:
     st.subheader("Worker attention list")
     attn = attention_table(sub, dose_col, cfg)
     st.dataframe(attn, width="stretch", hide_index=True)
+    st.caption(
+        "Current band uses the rolling 12-month sum. The projection annualises "
+        "what the worker would receive in the next year: with 24+ months of "
+        "history it uses each calendar month's historical mean (seasonal), "
+        "otherwise the last-6-month run-rate, and below 6 reported months no "
+        "projection is shown. Classification itself is a prospective RPO "
+        "decision."
+    )
     flagged = attn[
-        attn["classification band"].str.contains("🔴|🟠", regex=True)
+        attn["current band"].str.contains("🔴|🟠", regex=True)
+        | attn["projected band"].str.contains("🔴|🟠", regex=True)
     ]
     if not flagged.empty:
         st.caption(
-            f"{len(flagged)} worker(s) at or above a classification trigger in the "
-            f"trailing 12 months — review workload, apron integrity and "
+            f"{len(flagged)} worker(s) at or above a classification trigger now or "
+            f"on projection — review workload, apron integrity and "
             f"radiation-protection practices."
         )
 
