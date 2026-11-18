@@ -8,10 +8,19 @@ for interventional cardiologists over 5 years**.
 
 - **Trend windows**: 3, 6, 12 and 24-month rolling means, plus the full
   5-year history, switchable with one slider.
+- **Dose-metric selector**: the same trend views work for HP(10) Deep,
+  HP(3) Eye (lens of eye), HP(0.07) Shallow (skin) and Neutron, each with
+  its own reference limits (20 mSv/y deep & eye; 500 mSv/y skin). Metrics
+  without readings in the loaded data are hidden automatically.
 - **Cohort view**: monthly or quarterly aggregation, rolling means for the
   whole group, per-worker bars + rolling-average lines.
+- **Worker attention list**: every wearer ranked by trailing 12-month dose
+  as a percentage of the annual reference limit, with a green/amber/red
+  status flag and months-reported context.
+- **Dose heatmap**: worker × month grid of the last 24 months for spotting
+  workload spikes and pattern changes at a glance.
 - **Limit tracking**: trailing 12-month cumulative dose per worker against
-  the ICRP 20 mSv/y (5-year average) and 50 mSv single-year reference lines.
+  ICRP reference lines per metric.
 - **Annual comparison**: yearly total Hp(10) per worker, faceted and
   colour-coded by role.
 - **Bring your own data**: upload a dosimetry provider export or a canonical

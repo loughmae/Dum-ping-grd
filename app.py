@@ -28,8 +28,36 @@ import role_store
 
 EXAMPLE_CSV = Path(__file__).parent / "data" / "hp10_dose_example.csv"
 
-ICRP_ANNUAL_AVG_LIMIT = 20.0
-ICRP_SINGLE_YEAR_LIMIT = 50.0
+METRICS = {
+    "HP(10) Deep": {
+        "col": "hp10_deep_msv",
+        "annual_avg": 20.0,
+        "single_year": 50.0,
+        "limit_label": "ICRP 20 mSv/y (5-yr mean)",
+        "cap_label": "50 mSv single-year cap",
+    },
+    "HP(3) Eye": {
+        "col": "hp3_eye_msv",
+        "annual_avg": 20.0,
+        "single_year": 50.0,
+        "limit_label": "ICRP 20 mSv/y lens of eye (5-yr mean)",
+        "cap_label": "50 mSv single-year cap",
+    },
+    "HP(0.07) Shallow": {
+        "col": "hp007_shallow_msv",
+        "annual_avg": 500.0,
+        "single_year": None,
+        "limit_label": "Skin limit 500 mSv/y",
+        "cap_label": None,
+    },
+    "Neutron": {
+        "col": "neutron_msv",
+        "annual_avg": 20.0,
+        "single_year": None,
+        "limit_label": "20 mSv/y (5-yr mean)",
+        "cap_label": None,
+    },
+}
 
 WINDOW_CHOICES = {
     "3 months": 3,
@@ -39,7 +67,7 @@ WINDOW_CHOICES = {
     "5 years (all)": 60,
 }
 
-st.set_page_config(page_title="Hp(10) Dose Trends", page_icon="☢️", layout="wide")
+st.set_page_config(page_title="Dose Trends", page_icon="☢️", layout="wide")
 
 
 def ensure_example_csv() -> Path:
@@ -63,7 +91,11 @@ def apply_roles(df: pd.DataFrame) -> pd.DataFrame:
     assigned = role_store.load_roles()
     if "role" in df.columns:
         known = df.dropna(subset=["role"])[["worker_id", "role"]].drop_duplicates()
-        new = {str(w): str(r) for w, r in known.itertuples(index=False) if str(w) not in assigned}
+        new = {
+            str(w): str(r)
+            for w, r in known.itertuples(index=False)
+            if str(w) not in assigned
+        }
         if new:
             assigned.update(new)
             role_store.save_roles(assigned)
@@ -74,16 +106,12 @@ def apply_roles(df: pd.DataFrame) -> pd.DataFrame:
     return df, assigned
 
 
-def add_rolling(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+def add_rolling(df: pd.DataFrame, windows: list[int], col: str) -> pd.DataFrame:
     out = df.copy()
     for w in windows:
         out[f"roll_{w}m"] = (
-            out.groupby("worker_id", group_keys=False)["hp10_deep_msv"]
+            out.groupby("worker_id", group_keys=False)[col]
             .apply(lambda s: s.rolling(w, min_periods=max(w // 2, 1)).mean())
-        )
-        out[f"roll_{w}m_sum"] = (
-            out.groupby("worker_id", group_keys=False)["hp10_deep_msv"]
-            .apply(lambda s: s.rolling(w, min_periods=w).sum())
         )
     return out
 
@@ -91,15 +119,18 @@ def add_rolling(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
 def kpi_card(label: str, value: str, delta: str = "", help: str = "") -> None:
     st.metric(label, value, delta=delta or None, help=help or None)
 
-def monthly_trend_plot(sub: pd.DataFrame, window: int, aggregate: str) -> go.Figure:
+
+def monthly_trend_plot(
+    sub: pd.DataFrame, window: int, aggregate: str, col: str, metric: str
+) -> go.Figure:
     freq = {"Monthly": "M", "Quarterly": "Q"}[aggregate]
     agg = (
         sub.groupby(["worker_id", "name", sub["month"].dt.to_timestamp(freq=freq)])
-        .agg(dose=("hp10_deep_msv", "sum"))
+        .agg(dose=(col, "sum"))
         .reset_index()
         .rename(columns={"month": "period"})
     )
-    agg[f"rolling_{window}p"] = (
+    agg["rolling"] = (
         agg.groupby("worker_id", group_keys=False)["dose"]
         .apply(lambda s: s.rolling(window, min_periods=max(window // 2, 1)).mean())
     )
@@ -118,33 +149,34 @@ def monthly_trend_plot(sub: pd.DataFrame, window: int, aggregate: str) -> go.Fig
         fig.add_trace(
             go.Scatter(
                 x=grp["period"],
-                y=grp[f"rolling_{window}p"],
+                y=grp["rolling"],
                 mode="lines",
                 name=f"{name} ({window}p avg)",
                 line=dict(width=2),
                 legendgroup=wid,
             )
         )
+    unit = "quarter" if aggregate == "Quarterly" else "month"
     fig.update_layout(
         barmode="relative",
         template="plotly_white",
         height=440,
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        yaxis_title=f"Dose per {aggregate.lower()[:-2] if aggregate == 'Quarterly' else 'month'} (mSv)",
+        yaxis_title=f"{metric} per {unit} (mSv)",
         xaxis_title="Period",
         hovermode="x unified",
     )
     return fig
 
 
-def rolling_windows_plot(sub: pd.DataFrame) -> go.Figure:
+def rolling_windows_plot(sub: pd.DataFrame, col: str, metric: str) -> go.Figure:
     fig = go.Figure()
     colors = px.colors.qualitative.Set2
     for idx, (label, w) in enumerate(WINDOW_CHOICES.items()):
         if label == "5 years (all)":
             continue
         roll = (
-            sub.groupby("worker_id", group_keys=False)["hp10_deep_msv"]
+            sub.groupby("worker_id", group_keys=False)[col]
             .apply(lambda s: s.rolling(w, min_periods=max(w // 2, 1)).mean())
         )
         mean = roll.groupby(sub["month"]).mean()
@@ -160,16 +192,18 @@ def rolling_windows_plot(sub: pd.DataFrame) -> go.Figure:
     fig.update_layout(
         template="plotly_white",
         height=360,
-        yaxis_title="Cohort mean Hp(10) (mSv/month)",
+        yaxis_title=f"Cohort mean {metric} (mSv/month)",
         xaxis_title="Month",
         hovermode="x unified",
     )
     return fig
 
 
-def trailing_cumulative_plot(sub: pd.DataFrame) -> go.Figure:
+def trailing_cumulative_plot(
+    sub: pd.DataFrame, col: str, metric: str, cfg: dict
+) -> go.Figure:
     roll_sum = (
-        sub.groupby("worker_id", group_keys=False)["hp10_deep_msv"]
+        sub.groupby("worker_id", group_keys=False)[col]
         .apply(lambda s: s.rolling(12, min_periods=12).sum())
     )
     tmp = sub.assign(trailing12=roll_sum)
@@ -192,61 +226,103 @@ def trailing_cumulative_plot(sub: pd.DataFrame) -> go.Figure:
         )
     )
     fig.add_hline(
-        y=ICRP_ANNUAL_AVG_LIMIT,
-        line_dash="dash",
-        annotation_text="ICRP 20 mSv/y (5-yr mean)",
+        y=cfg["annual_avg"], line_dash="dash", annotation_text=cfg["limit_label"],
         line_color="#ff7f0e",
     )
-    fig.add_hline(
-        y=ICRP_SINGLE_YEAR_LIMIT,
-        line_dash="dot",
-        annotation_text="50 mSv single-year cap",
-        line_color="#d62728",
-    )
+    if cfg["single_year"] is not None:
+        fig.add_hline(
+            y=cfg["single_year"], line_dash="dot",
+            annotation_text=cfg["cap_label"], line_color="#d62728",
+        )
     fig.update_layout(
         template="plotly_white",
         height=360,
-        yaxis_title="Trailing 12-month Hp(10) (mSv)",
+        yaxis_title=f"Trailing 12-month {metric} (mSv)",
         xaxis_title="Month",
         hovermode="x unified",
     )
     return fig
 
 
-def worker_comparison_plot(sub: pd.DataFrame) -> go.Figure:
+def worker_comparison_plot(
+    sub: pd.DataFrame, col: str, metric: str, avg_limit: float
+) -> go.Figure:
     sub = sub.copy()
     sub["year"] = sub["month"].dt.year
-    yearly = (
-        sub.groupby(["worker_id", "name", "role", "year"])["hp10_deep_msv"]
-        .sum()
-        .reset_index()
-    )
+    yearly = sub.groupby(["worker_id", "name", "role", "year"])[col].sum().reset_index()
     fig = px.bar(
         yearly,
         x="year",
-        y="hp10_deep_msv",
+        y=col,
         color="role",
         facet_col="name",
         facet_col_wrap=4,
-        labels={"hp10_deep_msv": "Annual Hp(10) (mSv)", "year": "Year"},
+        labels={col: f"Annual {metric} (mSv)", "year": "Year"},
     )
     fig.add_hline(
-        y=ICRP_ANNUAL_AVG_LIMIT,
-        line_dash="dash",
-        line_color="#ff7f0e",
-        annotation_text="20 mSv/y",
+        y=avg_limit, line_dash="dash", line_color="#ff7f0e",
+        annotation_text=f"{avg_limit:g} mSv/y",
     )
     fig.update_layout(template="plotly_white", height=520, showlegend=True)
     fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
     return fig
 
 
+def attention_table(sub: pd.DataFrame, col: str, avg_limit: float) -> pd.DataFrame:
+    rows = []
+    for wid, grp in sub.groupby("worker_id"):
+        grp = grp.sort_values("month")
+        t12 = grp[col].tail(12).sum()
+        months = grp["month"].tail(12).nunique()
+        pct = t12 / avg_limit * 100 if avg_limit else 0
+        status = "🔴 over limit" if pct > 100 else "🟠 watch" if pct > 50 else "🟢 ok"
+        rows.append(
+            {
+                "worker": grp["name"].iloc[0],
+                "role": grp["role"].iloc[0],
+                f"trailing 12-mo (mSv)": round(float(t12), 2),
+                "months reported": months,
+                "% of annual limit": round(float(pct), 1),
+                "status": status,
+            }
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values("% of annual limit", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def dose_heatmap(sub: pd.DataFrame, col: str, metric: str, n_months: int = 24) -> go.Figure:
+    monthly = (
+        sub.groupby(["name", "month"])[col].sum().reset_index()
+    )
+    cutoff = sub["month"].max() - (n_months - 1)
+    recent = monthly[monthly["month"] >= cutoff]
+    piv = recent.pivot(index="name", columns="month", values=col).fillna(0.0)
+    totals = sub.groupby("name")[col].sum().sort_values(ascending=False)
+    piv = piv.loc[[n for n in totals.index if n in piv.index]]
+    piv.columns = [p.strftime("%b %y") for p in piv.columns]
+    fig = px.imshow(
+        piv,
+        aspect="auto",
+        color_continuous_scale="YlOrRd",
+        labels=dict(color=f"{metric} (mSv)"),
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=max(320, 28 * len(piv) + 120),
+        yaxis_title="Worker",
+        xaxis_title="Month",
+    )
+    return fig
+
+
 def main() -> None:
-    st.title("☢️ Hp(10) Deep Dose Trend Dashboard")
+    st.title("☢️ Radiation Dose Trend Dashboard")
     st.caption(
         "Occupational exposure trends for cardiology staff — 3, 6, 12-month "
-        "rolling views plus multi-year history. Reference limits: ICRP 20 mSv/y "
-        "averaged over 5 years, 50 mSv in any single year."
+        "rolling views plus multi-year history, by dose metric."
     )
 
     with st.sidebar:
@@ -267,6 +343,10 @@ def main() -> None:
         st.error(f"Could not parse the dose data: {exc}")
         st.stop()
 
+    available_metrics = [
+        label for label, cfg in METRICS.items()
+        if cfg["col"] in df.columns and df[cfg["col"]].notna().any()
+    ]
     unassigned = df.loc[df["role"] == "unassigned", "worker_id"].nunique()
     with st.expander(
         f"🏷️ Worker roles — {unassigned} unassigned",
@@ -313,6 +393,9 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Filters")
+        metric_label = st.selectbox("Dose metric", available_metrics)
+        cfg = METRICS[metric_label]
+        dose_col = cfg["col"]
         roles = sorted(df["role"].unique())
         default_roles = [r for r in roles if r != "control"]
         selected_roles = st.multiselect("Role", roles, default=default_roles)
@@ -338,16 +421,17 @@ def main() -> None:
     if selected_workers:
         mask &= df["name"].isin(selected_workers)
     sub = df[mask].copy()
+    sub = sub[sub[dose_col].notna()]
     if sub.empty:
-        st.warning("No data for the selected filters.")
+        st.warning(f"No {metric_label} readings for the selected filters.")
         st.stop()
 
-    sub = add_rolling(sub, [3, 6, 12])
+    sub = add_rolling(sub, [3, 6, 12], dose_col)
 
     latest = sub["month"].max()
     latest_row = sub[sub["month"] == latest]
     trailing = (
-        sub.groupby("worker_id")["hp10_deep_msv"]
+        sub.groupby("worker_id")[dose_col]
         .apply(lambda s: s.tail(12).sum())
         .sort_values(ascending=False)
     )
@@ -355,70 +439,92 @@ def main() -> None:
     top_name = sub.loc[sub["worker_id"] == top_worker, "name"].iloc[0]
     prev_12 = (
         sub[sub["month"] < latest - 11]
-        .groupby("worker_id")["hp10_deep_msv"]
+        .groupby("worker_id")[dose_col]
         .apply(lambda s: s.tail(12).sum())
         .mean()
     )
 
-    st.subheader(f"Key indicators — through {latest.strftime('%b %Y')}")
+    st.subheader(f"Key indicators — {metric_label}, through {latest.strftime('%b %Y')}")
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         kpi_card(
             "Latest month (mean)",
-            f"{latest_row['hp10_deep_msv'].mean():.2f} mSv",
-            help="Mean Hp(10) across selected workers in the latest reported month.",
+            f"{latest_row[dose_col].mean():.2f} mSv",
+            help=f"Mean {metric_label} across selected workers in the latest reported month.",
         )
     with c2:
-        kpi_card(
-            "3-month rolling mean",
-            f"{sub['roll_3m'].tail(1).mean():.2f} mSv/mo",
-        )
+        kpi_card("3-month rolling mean", f"{sub['roll_3m'].tail(1).mean():.2f} mSv/mo")
     with c3:
-        kpi_card(
-            "6-month rolling mean",
-            f"{sub['roll_6m'].tail(1).mean():.2f} mSv/mo",
-        )
+        kpi_card("6-month rolling mean", f"{sub['roll_6m'].tail(1).mean():.2f} mSv/mo")
     with c4:
-        kpi_card(
-            "12-month rolling mean",
-            f"{sub['roll_12m'].tail(1).mean():.2f} mSv/mo",
-        )
+        kpi_card("12-month rolling mean", f"{sub['roll_12m'].tail(1).mean():.2f} mSv/mo")
     with c5:
         worst = trailing.iloc[0]
         kpi_card(
             "Highest trailing 12-mo",
             f"{worst:.1f} mSv",
             f"{top_name}",
-            help="Sum of the last 12 months for the most exposed selected worker, "
-            "against the ICRP 20 mSv/y average limit.",
+            help=f"Sum of the last 12 months for the most exposed selected worker, "
+            f"against the {cfg['limit_label']} ({cfg['annual_avg']:g} mSv).",
         )
 
+    pct_of_limit = worst / cfg["annual_avg"] * 100
+    change_note = ""
     if not np.isnan(prev_12) and prev_12 > 0:
-        st.caption(
-            f"Cohort trailing 12-month dose changed "
+        change_note = (
+            f" Cohort trailing 12-month dose changed "
             f"{(trailing.mean() / prev_12 - 1) * 100:+.1f}% versus the previous "
             f"12-month block."
         )
+    st.caption(
+        f"Highest worker is at {pct_of_limit:.0f}% of the "
+        f"{cfg['annual_avg']:g} mSv/y reference.{change_note}"
+    )
+
+    st.subheader("Worker attention list")
+    attn = attention_table(sub, dose_col, cfg["annual_avg"])
+    st.dataframe(attn, width="stretch", hide_index=True)
+    flagged = attn[attn["status"] != "🟢 ok"]
+    if not flagged.empty:
+        st.caption(
+            f"{len(flagged)} worker(s) above 50% of the {cfg['annual_avg']:g} mSv/y "
+            f"reference in the trailing 12 months — review workload and "
+            f"radiation-protection practices."
+        )
 
     st.subheader(f"Dose trend — {window_label} window")
-    st.plotly_chart(monthly_trend_plot(sub, window, aggregate), width="stretch")
+    st.plotly_chart(
+        monthly_trend_plot(sub, window, aggregate, dose_col, metric_label),
+        width="stretch",
+    )
 
     left, right = st.columns(2)
     with left:
         st.subheader("Rolling means (cohort)")
-        st.plotly_chart(rolling_windows_plot(sub), width="stretch")
+        st.plotly_chart(rolling_windows_plot(sub, dose_col, metric_label), width="stretch")
     with right:
         st.subheader("Trailing 12-month cumulative vs limits")
-        st.plotly_chart(trailing_cumulative_plot(sub), width="stretch")
+        st.plotly_chart(
+            trailing_cumulative_plot(sub, dose_col, metric_label, cfg), width="stretch"
+        )
+
+    st.subheader(f"Dose heatmap — last 24 months ({metric_label})")
+    st.plotly_chart(dose_heatmap(sub, dose_col, metric_label), width="stretch")
 
     st.subheader("Annual dose by worker")
-    st.plotly_chart(worker_comparison_plot(sub), width="stretch")
+    st.plotly_chart(
+        worker_comparison_plot(sub, dose_col, metric_label, cfg["annual_avg"]),
+        width="stretch",
+    )
 
     with st.expander("Recent data"):
-        base_cols = ["month", "worker_id", "name", "role", "hp10_deep_msv"]
+        base_cols = ["month", "worker_id", "name", "role", dose_col]
         extra_cols = [
-            c for c in ["hp3_eye_msv", "hp007_shallow_msv", "neutron_msv", "badge_type", "location"]
-            if c in sub.columns
+            c for c in [
+                "hp3_eye_msv", "hp007_shallow_msv", "neutron_msv",
+                "badge_type", "location",
+            ]
+            if c in sub.columns and c != dose_col
         ]
         show = sub[base_cols + extra_cols].copy()
         show["month"] = show["month"].astype(str)
@@ -426,7 +532,7 @@ def main() -> None:
         st.download_button(
             "Download filtered data (CSV)",
             show.to_csv(index=False).encode(),
-            file_name="hp10_filtered.csv",
+            file_name="dose_filtered.csv",
             mime="text/csv",
         )
 
