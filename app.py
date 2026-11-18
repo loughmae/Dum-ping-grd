@@ -28,36 +28,97 @@ import role_store
 
 EXAMPLE_CSV = Path(__file__).parent / "data" / "hp10_dose_example.csv"
 
+INF = float("inf")
+
 METRICS = {
     "HP(10) Deep": {
         "col": "hp10_deep_msv",
-        "annual_avg": 20.0,
+        "annual_limit": 20.0,
+        "bands": [
+            (1.0, "⚪ below Cat B (<1 mSv/y)"),
+            (6.0, "🔵 Cat B band (1-6 mSv/y)"),
+            (20.0, "🟠 Cat A band (6-20 mSv/y)"),
+            (INF, "🔴 over dose limit (>20 mSv/y)"),
+        ],
+        "lines": [
+            (1.0, "Cat B threshold 1 mSv/y", "dot", "#1f77b4"),
+            (6.0, "Cat A threshold 6 mSv/y", "dash", "#ff7f0e"),
+            (20.0, "Annual dose limit 20 mSv/y", "dash", "#d62728"),
+        ],
         "single_year": 50.0,
-        "limit_label": "ICRP 20 mSv/y (5-yr mean)",
         "cap_label": "50 mSv single-year cap",
+        "five_year": 100.0,
+        "five_year_label": "100 mSv in any 5 consecutive years",
+        "limit_caption": "IRR19: 20 mSv/y effective dose; Cat B beyond 1 mSv/y, Cat A beyond 6 mSv/y",
     },
     "HP(3) Eye": {
         "col": "hp3_eye_msv",
-        "annual_avg": 20.0,
+        "annual_limit": 20.0,
+        "bands": [
+            (15.0, "🟢 below Cat A threshold (<15 mSv/y)"),
+            (20.0, "🟠 Cat A trigger (15-20 mSv/y)"),
+            (INF, "🔴 over eye limit (>20 mSv/y)"),
+        ],
+        "lines": [
+            (15.0, "Cat A threshold 15 mSv/y", "dot", "#1f77b4"),
+            (20.0, "Eye dose limit 20 mSv/y", "dash", "#d62728"),
+        ],
         "single_year": 50.0,
-        "limit_label": "ICRP 20 mSv/y lens of eye (5-yr mean)",
-        "cap_label": "50 mSv single-year cap",
+        "cap_label": "50 mSv single-year max",
+        "five_year": 100.0,
+        "five_year_label": "100 mSv in any 5 consecutive years",
+        "limit_caption": "IRR19: 20 mSv/y eye limit (100 mSv/5y, max 50/y); Cat A beyond 15 mSv/y",
     },
     "HP(0.07) Shallow": {
         "col": "hp007_shallow_msv",
-        "annual_avg": 500.0,
+        "annual_limit": 500.0,
+        "bands": [
+            (500.0, "🟢 ok (<500 mSv/y)"),
+            (INF, "🔴 over skin limit (>500 mSv/y)"),
+        ],
+        "lines": [(500.0, "Skin limit 500 mSv/y", "dash", "#d62728")],
         "single_year": None,
-        "limit_label": "Skin limit 500 mSv/y",
         "cap_label": None,
+        "five_year": None,
+        "five_year_label": None,
+        "limit_caption": "IRR19: skin limit 500 mSv/y averaged over 1 cm²",
     },
     "Neutron": {
         "col": "neutron_msv",
-        "annual_avg": 20.0,
+        "annual_limit": 20.0,
+        "bands": [
+            (20.0, "🟢 ok (<20 mSv/y)"),
+            (INF, "🔴 over limit (>20 mSv/y)"),
+        ],
+        "lines": [(20.0, "Dose limit 20 mSv/y", "dash", "#d62728")],
         "single_year": None,
-        "limit_label": "20 mSv/y (5-yr mean)",
         "cap_label": None,
+        "five_year": None,
+        "five_year_label": None,
+        "limit_caption": "Dose limit 20 mSv/y",
     },
 }
+
+
+def band_for(t12: float, bands: list[tuple[float, str]]) -> str:
+    for value, label in bands:
+        if t12 < value:
+            return label
+    return bands[-1][1]
+
+
+def add_limit_lines(fig: go.Figure, cfg: dict) -> None:
+    for value, label, dash, color in cfg["lines"]:
+        fig.add_hline(
+            y=value, line_dash=dash, annotation_text=label, line_color=color,
+            annotation_position="top left",
+        )
+    if cfg["single_year"] is not None:
+        fig.add_hline(
+            y=cfg["single_year"], line_dash="dot",
+            annotation_text=cfg["cap_label"], line_color="#d62728",
+            annotation_position="top left",
+        )
 
 WINDOW_CHOICES = {
     "3 months": 3,
@@ -225,15 +286,31 @@ def trailing_cumulative_plot(
             line=dict(width=2, color="#1f77b4"),
         )
     )
-    fig.add_hline(
-        y=cfg["annual_avg"], line_dash="dash", annotation_text=cfg["limit_label"],
-        line_color="#ff7f0e",
-    )
-    if cfg["single_year"] is not None:
-        fig.add_hline(
-            y=cfg["single_year"], line_dash="dot",
-            annotation_text=cfg["cap_label"], line_color="#d62728",
+    if cfg.get("five_year") is not None:
+        roll5 = (
+            sub.groupby("worker_id", group_keys=False)[col]
+            .apply(lambda s: s.rolling(60, min_periods=60).sum())
         )
+        tmp5 = sub.assign(trailing60=roll5).dropna(subset=["trailing60"])
+        if not tmp5.empty:
+            by_month5 = tmp5.groupby("month")["trailing60"].agg(["mean", "max"]).reset_index()
+            fig.add_trace(
+                go.Scatter(
+                    x=by_month5["month"].dt.to_timestamp(),
+                    y=by_month5["max"],
+                    name="Highest worker (5-yr sum)",
+                    line=dict(width=2, color="#9467bd", dash="dot"),
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=by_month5["month"].dt.to_timestamp(),
+                    y=by_month5["mean"],
+                    name="Cohort mean (5-yr sum)",
+                    line=dict(width=2, color="#8c564b", dash="dot"),
+                )
+            )
+    add_limit_lines(fig, cfg)
     fig.update_layout(
         template="plotly_white",
         height=360,
@@ -245,7 +322,7 @@ def trailing_cumulative_plot(
 
 
 def worker_comparison_plot(
-    sub: pd.DataFrame, col: str, metric: str, avg_limit: float
+    sub: pd.DataFrame, col: str, metric: str, cfg: dict
 ) -> go.Figure:
     sub = sub.copy()
     sub["year"] = sub["month"].dt.year
@@ -259,31 +336,27 @@ def worker_comparison_plot(
         facet_col_wrap=4,
         labels={col: f"Annual {metric} (mSv)", "year": "Year"},
     )
-    fig.add_hline(
-        y=avg_limit, line_dash="dash", line_color="#ff7f0e",
-        annotation_text=f"{avg_limit:g} mSv/y",
-    )
+    add_limit_lines(fig, cfg)
     fig.update_layout(template="plotly_white", height=520, showlegend=True)
     fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
     return fig
 
 
-def attention_table(sub: pd.DataFrame, col: str, avg_limit: float) -> pd.DataFrame:
+def attention_table(sub: pd.DataFrame, col: str, cfg: dict) -> pd.DataFrame:
     rows = []
     for wid, grp in sub.groupby("worker_id"):
         grp = grp.sort_values("month")
         t12 = grp[col].tail(12).sum()
         months = grp["month"].tail(12).nunique()
-        pct = t12 / avg_limit * 100 if avg_limit else 0
-        status = "🔴 over limit" if pct > 100 else "🟠 watch" if pct > 50 else "🟢 ok"
+        pct = t12 / cfg["annual_limit"] * 100 if cfg["annual_limit"] else 0
         rows.append(
             {
                 "worker": grp["name"].iloc[0],
                 "role": grp["role"].iloc[0],
-                f"trailing 12-mo (mSv)": round(float(t12), 2),
+                "trailing 12-mo (mSv)": round(float(t12), 2),
                 "months reported": months,
                 "% of annual limit": round(float(pct), 1),
-                "status": status,
+                "classification band": band_for(t12, cfg["bands"]),
             }
         )
     return (
@@ -465,10 +538,10 @@ def main() -> None:
             f"{worst:.1f} mSv",
             f"{top_name}",
             help=f"Sum of the last 12 months for the most exposed selected worker, "
-            f"against the {cfg['limit_label']} ({cfg['annual_avg']:g} mSv).",
+            f"against the {cfg['annual_limit']:g} mSv/y annual limit.",
         )
 
-    pct_of_limit = worst / cfg["annual_avg"] * 100
+    pct_of_limit = worst / cfg["annual_limit"] * 100
     change_note = ""
     if not np.isnan(prev_12) and prev_12 > 0:
         change_note = (
@@ -477,18 +550,22 @@ def main() -> None:
             f"12-month block."
         )
     st.caption(
-        f"Highest worker is at {pct_of_limit:.0f}% of the "
-        f"{cfg['annual_avg']:g} mSv/y reference.{change_note}"
+        f"Highest worker sits in band: {band_for(worst, cfg['bands'])} "
+        f"({pct_of_limit:.0f}% of the {cfg['annual_limit']:g} mSv/y limit).{change_note} "
+        f"Note: {cfg['limit_caption']}. Classification bands are prospective "
+        f"(expected dose); the trailing 12-month sum is a retrospective proxy."
     )
 
     st.subheader("Worker attention list")
-    attn = attention_table(sub, dose_col, cfg["annual_avg"])
+    attn = attention_table(sub, dose_col, cfg)
     st.dataframe(attn, width="stretch", hide_index=True)
-    flagged = attn[attn["status"] != "🟢 ok"]
+    flagged = attn[
+        attn["classification band"].str.contains("🔴|🟠", regex=True)
+    ]
     if not flagged.empty:
         st.caption(
-            f"{len(flagged)} worker(s) above 50% of the {cfg['annual_avg']:g} mSv/y "
-            f"reference in the trailing 12 months — review workload and "
+            f"{len(flagged)} worker(s) at or above a classification trigger in the "
+            f"trailing 12 months — review workload, apron integrity and "
             f"radiation-protection practices."
         )
 
@@ -513,7 +590,7 @@ def main() -> None:
 
     st.subheader("Annual dose by worker")
     st.plotly_chart(
-        worker_comparison_plot(sub, dose_col, metric_label, cfg["annual_avg"]),
+        worker_comparison_plot(sub, dose_col, metric_label, cfg),
         width="stretch",
     )
 

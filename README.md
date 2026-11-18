@@ -10,13 +10,19 @@ for interventional cardiologists over 5 years**.
   5-year history, switchable with one slider.
 - **Dose-metric selector**: the same trend views work for HP(10) Deep,
   HP(3) Eye (lens of eye), HP(0.07) Shallow (skin) and Neutron, each with
-  its own reference limits (20 mSv/y deep & eye; 500 mSv/y skin). Metrics
+  its own Irish IRR19 limits and classification bands. Metrics
   without readings in the loaded data are hidden automatically.
+- **Irish classification framework** (S.I. No. 30 of 2019 / EU BSSD):
+  whole-body effective dose — 1 mSv/y public/Cat B trigger, 6 mSv/y Cat A
+  trigger, 20 mSv/y annual limit; lens of eye — 15 mSv/y Cat A trigger,
+  20 mSv/y annual limit (100 mSv/5y, max 50 mSv single year); skin —
+  500 mSv/y. The attention list shows each worker's classification band,
+  and charts carry all threshold lines plus the 100 mSv/5-year constraint.
 - **Cohort view**: monthly or quarterly aggregation, rolling means for the
   whole group, per-worker bars + rolling-average lines.
 - **Worker attention list**: every wearer ranked by trailing 12-month dose
-  as a percentage of the annual reference limit, with a green/amber/red
-  status flag and months-reported context.
+  as a percentage of the annual reference limit, with their classification
+  band and months-reported context.
 - **Dose heatmap**: worker × month grid of the last 24 months for spotting
   workload spikes and pattern changes at a glance.
 - **Limit tracking**: trailing 12-month cumulative dose per worker against
